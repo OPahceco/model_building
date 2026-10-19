@@ -52,85 +52,51 @@ def cluster_jets(jets, R):
     return fastjet.ClusterSequence(ak.to_packed(jets["Constituents"]), jet_def)
 
 
-def ecf(cs, npoint, angles, beta):
-    # generalized ECF of each jet when it is clustered exclusively into one jet: one value per jet
-    values = cs.exclusive_jets_energy_correlator(
-        njets=1, beta=beta, npoint=npoint, angles=angles, func="generalized"
-    )
+def builtin_ecf(cs, func, beta):
+    # FastJet's built-in ECF variation (e.g. "n2", "n3") of each jet when clustered exclusively into one jet
+    values = cs.exclusive_jets_energy_correlator(njets=1, beta=beta, func=func)
     values = ak.fill_none(values, np.nan)
     return ak.to_numpy(ak.flatten(values, axis=None)).astype(np.float64)
 
 
-def ratio(numerator, denominator, fill_value):
-    # numerator / denominator**2, or fill_value where it cannot be computed
-    with np.errstate(divide="ignore", invalid="ignore"):
-        result = numerator / denominator**2
-    good = (
-        np.isfinite(numerator)
-        & np.isfinite(denominator)
-        & (denominator > 0.0)
-        & np.isfinite(result)
-    )
-    return np.where(good, result, fill_value)
-
-
-def calculate_n2_n3_fastjet(FJ, beta=1.0, fill_value=SENTINEL):
+def calculate_fatjet_observables(FJ, beta=1.0, fill_value=SENTINEL, lund_R=0.8, min_jet_pt=20.0):
     """
-    Generalized ECF observables of each FatJet:
+    N2, N3 and the primary Lund-plane points of each FatJet, using FastJet.
+    All jets are clustered once (Cambridge/Aachen), and all observables are taken from that clustering.
 
-        N2 = (2e3) / (1e2)^2    (needs at least 3 constituents)
-        N3 = (2e4) / (1e3)^2    (needs at least 4 constituents)
+        N2 and N3 use FastJet's built-in "n2" and "n3" respectively.
+        Lund points: LundX = log(lund_R/Delta), LundY = log(kt); jets need pT >= min_jet_pt
 
-    Jets that cannot be assigned a value get fill_value.
-    Output shape: event -> FatJet
-    """
-    jets = ak.flatten(FJ, axis=1)  # all jets of all events in one list
-    n_const = count_constituents(jets)
-
-    n2 = np.full(len(jets), fill_value, dtype=np.float64)
-    n3 = np.full(len(jets), fill_value, dtype=np.float64)
-
-    # The constituents already belong to one FatJet. The large radius ensures that
-    # FastJet combines all of them into one exclusive jet.
-    sel = n_const >= 3
-    if np.any(sel):
-        cs = cluster_jets(jets[sel], R=1000.0)
-        n2[sel] = ratio(ecf(cs, 3, 2, beta), ecf(cs, 2, 1, beta), fill_value)
-
-    sel = n_const >= 4
-    if np.any(sel):
-        cs = cluster_jets(jets[sel], R=1000.0)
-        n3[sel] = ratio(ecf(cs, 4, 2, beta), ecf(cs, 3, 1, beta), fill_value)
-
-    # back to event -> FatJet
-    n_per_event = ak.to_numpy(ak.fill_none(ak.num(FJ, axis=1), 0))
-    N2 = ak.unflatten(n2.astype(np.float32), n_per_event)
-    N3 = ak.unflatten(n3.astype(np.float32), n_per_event)
-    return ak.to_packed(N2), ak.to_packed(N3)
-
-
-def calculate_primary_lund_xy_fastjet(FJ, R=0.8, min_jet_pt=20.0):
-    """
-    Primary Lund-plane points of each FatJet, using FastJet.
-    Jets need pT >= min_jet_pt and at least 2 constituents.
-
-    Output shape: event -> Lund point (all jets of an event are put together)
+    Jets that cannot be assigned an N2 or N3 value get fill_value.
+    Returns N2, N3 (shape: event -> FatJet), LundX, LundY (shape: event -> Lund point), and
+    the number of jets used for the Lund points.
     """
     jets = ak.flatten(FJ, axis=1)  # all jets of all events in one list
     n_const = count_constituents(jets)
     pt = ak.to_numpy(ak.fill_none(jets["PT"], 0.0))
-    used = (pt >= min_jet_pt) & (n_const >= 2)
-    n_jets = int(np.count_nonzero(used))
 
+    n2 = np.full(len(jets), fill_value, dtype=np.float64)
+    n3 = np.full(len(jets), fill_value, dtype=np.float64)
     n_points = np.zeros(len(jets), dtype=np.int64)  # number of Lund points of each jet
     x_flat = np.zeros(0, dtype=np.float64)
     y_flat = np.zeros(0, dtype=np.float64)
+    n_jets = 0
 
-    if n_jets > 0:
-        cs = cluster_jets(jets[used], R=R)
 
-        # Recluster the constituents into one exclusive C/A jet,
-        # then obtain its primary Lund declustering sequence.
+    clustered = np.flatnonzero(n_const >= 2)
+    if len(clustered) > 0:
+        cs = cluster_jets(jets[clustered], R=1000.0)
+        nc = n_const[clustered]
+
+
+        n2_all = builtin_ecf(cs, "n2", beta)
+        n3_all = builtin_ecf(cs, "n3", beta)
+        ok2 = (nc >= 3) & np.isfinite(n2_all)
+        ok3 = (nc >= 4) & np.isfinite(n3_all)
+        n2[clustered[ok2]] = n2_all[ok2]
+        n3[clustered[ok3]] = n3_all[ok3]
+
+
         lund = cs.exclusive_jets_lund_declusterings(njets=1)
 
         if "Delta" not in lund.fields or "kt" not in lund.fields:
@@ -148,21 +114,32 @@ def calculate_primary_lund_xy_fastjet(FJ, R=0.8, min_jet_pt=20.0):
             kt = ak.flatten(kt, axis=1)
 
         good = np.isfinite(delta) & np.isfinite(kt) & (delta > 0.0) & (kt > 0.0)
-        x = np.log(R / delta[good])
+        x = np.log(lund_R / delta[good])
         y = np.log(kt[good])
 
-        n_points[used] = ak.to_numpy(ak.num(x, axis=1))
+        # jet pT requirement is applied to the results
+        use = pt[clustered] >= min_jet_pt
+        n_jets = int(np.count_nonzero(use))
+        x = x[use]
+        y = y[use]
+
+        n_points[clustered[use]] = ak.to_numpy(ak.num(x, axis=1))
         x_flat = ak.to_numpy(ak.flatten(x, axis=1))
         y_flat = ak.to_numpy(ak.flatten(y, axis=1))
 
-    # jet -> point, then event -> jet -> point, then all the points of an event together
     n_per_event = ak.to_numpy(ak.fill_none(ak.num(FJ, axis=1), 0))
+
+    # back to event -> FatJet
+    N2 = ak.to_packed(ak.unflatten(n2.astype(np.float32), n_per_event))
+    N3 = ak.to_packed(ak.unflatten(n3.astype(np.float32), n_per_event))
+
+    # jet -> point, then event -> jet -> point, then all the points of an event together
     LundX = ak.unflatten(ak.unflatten(x_flat, n_points), n_per_event)
     LundY = ak.unflatten(ak.unflatten(y_flat, n_points), n_per_event)
     LundX = to_f32_jagged(ak.flatten(LundX, axis=2))
     LundY = to_f32_jagged(ak.flatten(LundY, axis=2))
 
-    return LundX, LundY, n_jets
+    return N2, N3, LundX, LundY, n_jets
 
 def make_friend_tree(root_fname, friend_fname, with_constituents=True, verbose=False):
     """
@@ -177,14 +154,11 @@ def make_friend_tree(root_fname, friend_fname, with_constituents=True, verbose=F
     n_evt = len(events)
     FJ = events.FatJet
 
-    # N2, N3
-    N2, N3 = calculate_n2_n3_fastjet(FJ, beta=1.0, fill_value=SENTINEL)
-    jets_like = {"N2": N2, "N3": N3}
-
-    # primary Lund plane points. Shape: event -> Lund point
-    FatJet_LundX, FatJet_LundY, n_jets = calculate_primary_lund_xy_fastjet(
-        FJ, R=0.8, min_jet_pt=20.0
+    # N2, N3 (shape: event -> FatJet) and primary Lund plane points (shape: event -> Lund point)
+    N2, N3, FatJet_LundX, FatJet_LundY, n_jets = calculate_fatjet_observables(
+        FJ, beta=1.0, fill_value=SENTINEL, lund_R=0.8, min_jet_pt=20.0
     )
+    jets_like = {"N2": N2, "N3": N3}
 
     # make sure the friend tree has the same number of entries as the Delphes tree
     all_arrays = dict(jets_like, LundX=FatJet_LundX, LundY=FatJet_LundY)
