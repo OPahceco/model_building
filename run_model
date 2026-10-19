@@ -8,6 +8,7 @@ from magiconfig import ArgumentParser, MagiConfig, MagiConfigOptions, ArgumentDe
 from svjHelper import svjHelper, extHelper
 import Histogram
 from common import config_path
+import DS_observables
 
 config_path()
 
@@ -54,7 +55,7 @@ def pythia_handlers():
 if __name__=="__main__":
     _parser_common = ArgumentParser(add_help=False)
 
-    allowed_steps = ['cards','pythia','delphes','hist']
+    allowed_steps = ['cards','pythia','delphes','observables','hist']
 
     common = _parser_common.add_argument_group("common")
     common.add_argument("--steps", type=str, nargs='*', default=['cards'], choices=allowed_steps+['all'], help="run these steps")
@@ -68,6 +69,7 @@ if __name__=="__main__":
     common.add_argument("--no-constituents", default=False, action="store_true", help="disable (potentially intensive) constituent-based computations during histogramming")
     common.add_argument("--gen-only", default=False, action="store_true", help="only make histograms of gen-level quantities")
     common.add_argument("--debug", default=False, action="store_true", help="enable detailed debug printouts during histogramming")
+    common.add_argument("--no-merge", default=False, action="store_true", help="in the observables step, skip merging the friend tree into the Delphes tree (only events_friend.root is written)")
 
     parser = ArgumentParser(
         formatter_class=ArgumentDefaultsRawHelpFormatter
@@ -106,6 +108,8 @@ if __name__=="__main__":
     args["common"].pythia = [Path(txt).absolute() for txt in args["common"].pythia]
     args["common"].delphes = Path(args["common"].delphes).absolute()
 
+    merge_macro = Path(__file__).resolve().parent / "merge_trees.C"
+
     helper = helper_class(args["model"])
     name = helper.name()
     outdir = os.path.join(args["common"].dir,name)
@@ -126,6 +130,9 @@ if __name__=="__main__":
     hepmc_fname = "events.hepmc"
     hepmc_fname_gz = hepmc_fname+".gz"
     root_fname = "events.root"
+
+    friend_fname = "events_friend.root"
+    merged_fname = "events_merged.root"
 
     if 'cards' in args["common"].steps:
         # step 0: generate cards
@@ -179,12 +186,46 @@ if __name__=="__main__":
         if os.path.exists(root_fname):
             if args["common"].verbose: print(f'removing old {root_fname}')
             os.remove(root_fname)
+
+        # files derived from events.root would be outdated, remove them too
+        for stale in (friend_fname, merged_fname):
+            if os.path.exists(stale):
+                if args["common"].verbose: print(f'removing old {stale}')
+                os.remove(stale)
+
         delphes_cmd = f'gunzip -c {hepmc_fname_gz} | {delphes_exe} {delphes_fname} {root_fname}'
         if not args["common"].quiet: print(f'Running Delphes ({log_fname})')
         run_cmd(delphes_cmd, log_fname, args["common"].verbose, shell=True)
         if args["common"].verbose: print(f'wrote {root_fname}')
 
-    if 'hist' in args["common"].steps:
+    # the extra observables are computed from jet constituents
+    make_friends = not args["common"].no_constituents
+    if 'observables' in args["common"].steps and not make_friends:
+        if not args["common"].quiet: print("Skipping observables: they require constituents")
 
+    if 'observables' in args["common"].steps and make_friends:
+        # step 3: additional dark-sector observables, saved as a friend tree
+        if not os.path.exists(root_fname):
+            raise RuntimeError(f'Could not find input {root_fname}')
+        if not args["common"].quiet: print("Computing additional observables")
+        DS_observables.make_friend_tree(root_fname, friend_fname, verbose=args["common"].verbose)
+        if args["common"].verbose: print(f'wrote {friend_fname}')
+
+        if args["common"].no_merge:
+            # an old merged file would not match the new friend tree
+            if os.path.exists(merged_fname):
+                if args["common"].verbose: print(f'removing old {merged_fname}')
+                os.remove(merged_fname)
+        else:
+            # step 3.5: merge the friend tree into the Delphes tree
+            log_fname = "log_merge.log"
+            friend_branches = ",".join(DS_observables.FRIEND_BRANCHES)
+            macro_verbose = "true" if args["common"].verbose else "false"
+            merge_cmd = f'root -l -b -q \'{merge_macro}("{root_fname}","{friend_fname}","{merged_fname}","{friend_branches}",{macro_verbose})\''
+            if not args["common"].quiet: print(f'Merging trees ({log_fname})')
+            run_cmd(merge_cmd, log_fname, args["common"].verbose, shell=True)
+            if args["common"].verbose: print(f'wrote {merged_fname}')
+
+    if 'hist' in args["common"].steps:
         Histogram.histogram(root_fname, helper, not args["common"].no_constituents, args["common"].gen_only, args["common"].debug)
         if args["common"].verbose: print(f'wrote histograms of {root_fname}')
