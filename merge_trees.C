@@ -7,7 +7,6 @@
 #include <string>
 #include <memory>
 #include <iostream>
-#include <sstream>
 
 // Report failure to the caller: a plain "return" from a macro does not change the exit
 // status of `root -q`, so exit explicitly to let run_model detect the error and stop
@@ -20,7 +19,7 @@ int merge_trees(
   const char* fMain    = "events.root",
   const char* fFriend  = "events_friend.root",
   const char* fOut     = "merged_tree.root",
-  const char* branches = "",
+  const std::vector<std::string>& branches = {},
   bool        verbose  = false,
   const char* tMain    = "Delphes",
   const char* tFr      = "DelphesFriend"
@@ -62,16 +61,8 @@ int merge_trees(
     return fail(2);
   }
 
-  // --- Which friend branches to add: comma-separated list given by the caller ---
-  std::vector<std::string> want;
-  {
-    std::stringstream ss(branches);
-    std::string item;
-    while (std::getline(ss, item, ',')) {
-      if (!item.empty()) want.push_back(item);
-    }
-  }
-  if (want.empty()) {
+  // --- Which friend branches to add: list given by the caller ---
+  if (branches.empty()) {
     std::cerr << "No friend branches requested.\n";
     return fail(5);
   }
@@ -88,8 +79,8 @@ int merge_trees(
     std::vector<float> buffer;          // output buffer
   };
   std::vector<FriendItem> items;
-  items.reserve(want.size());
-  for (const auto& nm : want) {
+  items.reserve(branches.size());
+  for (const auto& nm : branches) {
     if (!tf->GetBranch(nm.c_str())) {
       std::cerr << "Requested friend branch not found: " << nm << "\n";
       return fail(6);
@@ -121,8 +112,7 @@ int merge_trees(
   const Long64_t n = tm->GetEntries();
   for (Long64_t i = 0; i < n; ++i) {
     // advance both readers/trees in lockstep
-    if (!rMain.Next()) break;
-    if (!rFr.Next())   break;
+    if (!rMain.Next() or !rFr.Next()) break;
 
     // copy each friend array into the vector buffer
     for (auto& it : items) {
@@ -143,8 +133,8 @@ int merge_trees(
   fout->Close();
 
 
-//   fout.Write();
-    if (verbose) {
+
+  if (verbose) {
     std::cout << "Wrote " << fOut << " with full Delphes + "
               << items.size() << " friend branches (prefixed F_*)\n";
   }

@@ -41,6 +41,7 @@ def force_fatjet_layout(arr, FJ):
     fixed = ak.fill_none(padded[jet_index], 0.0)
     return ak.to_packed(ak.values_astype(fixed, np.float32))
 
+
 def count_constituents(jets):
     # number of constituents of each jet in a flat jet array
     return ak.to_numpy(ak.fill_none(ak.num(jets["Constituents"], axis=1), 0))
@@ -59,21 +60,32 @@ def builtin_ecf(cs, func, beta):
     return ak.to_numpy(ak.flatten(values, axis=None)).astype(np.float64)
 
 
-def calculate_fatjet_observables(FJ, beta=1.0, fill_value=SENTINEL, lund_R=0.8, min_jet_pt=20.0):
+def lund_points_per_event(values, n_per_jet, n_per_event):
+    """
+    Flat list of Lund points -> shape: event -> Lund point (float32).
+    n_per_jet: number of points of each jet, n_per_event: number of jets of each event.
+    All the points of the jets of an event are put together.
+    """
+    per_jet = ak.unflatten(values, n_per_jet)  # jet -> point
+    per_event = ak.unflatten(per_jet, n_per_event)  # event -> jet -> point
+    return to_f32_jagged(ak.flatten(per_event, axis=2))  # event -> point
+
+def calculate_fatjet_observables(FJ, beta=1.0, fill_value=SENTINEL, lund_R=0.8):
     """
     N2, N3 and the primary Lund-plane points of each FatJet, using FastJet.
     All jets are clustered once (Cambridge/Aachen), and all observables are taken from that clustering.
 
-        N2 and N3 use FastJet's built-in "n2" and "n3" respectively.
-        Lund points: LundX = log(lund_R/Delta), LundY = log(kt); jets need pT >= min_jet_pt
+        N2: FastJet's built-in "n2", needs at least 3 constituents
+        N3: FastJet's built-in "n3", needs at least 4 constituents
+        Lund points: LundX = log(lund_R/Delta), LundY = log(kt), need at least 2 constituents
 
     Jets that cannot be assigned an N2 or N3 value get fill_value.
-    Returns N2, N3 (shape: event -> FatJet), LundX, LundY (shape: event -> Lund point), and
-    the number of jets used for the Lund points.
+    Returns two dictionaries and the number of jets used for the Lund points:
+        fatjet_obs: "N2", "N3" (shape: event -> FatJet), written into the FatJet record
+        lund_obs: "LundX", "LundY" (shape: event -> Lund point), written as separate records
     """
     jets = ak.flatten(FJ, axis=1)  # all jets of all events in one list
     n_const = count_constituents(jets)
-    pt = ak.to_numpy(ak.fill_none(jets["PT"], 0.0))
 
     n2 = np.full(len(jets), fill_value, dtype=np.float64)
     n3 = np.full(len(jets), fill_value, dtype=np.float64)
@@ -82,7 +94,7 @@ def calculate_fatjet_observables(FJ, beta=1.0, fill_value=SENTINEL, lund_R=0.8, 
     y_flat = np.zeros(0, dtype=np.float64)
     n_jets = 0
 
-
+    # Cluster once
     clustered = np.flatnonzero(n_const >= 2)
     if len(clustered) > 0:
         cs = cluster_jets(jets[clustered], R=1000.0)
@@ -96,15 +108,8 @@ def calculate_fatjet_observables(FJ, beta=1.0, fill_value=SENTINEL, lund_R=0.8, 
         n2[clustered[ok2]] = n2_all[ok2]
         n3[clustered[ok3]] = n3_all[ok3]
 
-
+        # Primary Lund declustering
         lund = cs.exclusive_jets_lund_declusterings(njets=1)
-
-        if "Delta" not in lund.fields or "kt" not in lund.fields:
-            raise RuntimeError(
-                "FastJet Lund output does not contain the expected "
-                f"'Delta' and 'kt' fields. Found: {lund.fields}"
-            )
-
         delta = lund["Delta"]
         kt = lund["kt"]
 
@@ -117,13 +122,8 @@ def calculate_fatjet_observables(FJ, beta=1.0, fill_value=SENTINEL, lund_R=0.8, 
         x = np.log(lund_R / delta[good])
         y = np.log(kt[good])
 
-        # jet pT requirement is applied to the results
-        use = pt[clustered] >= min_jet_pt
-        n_jets = int(np.count_nonzero(use))
-        x = x[use]
-        y = y[use]
-
-        n_points[clustered[use]] = ak.to_numpy(ak.num(x, axis=1))
+        n_jets = len(clustered)
+        n_points[clustered] = ak.to_numpy(ak.num(x, axis=1))
         x_flat = ak.to_numpy(ak.flatten(x, axis=1))
         y_flat = ak.to_numpy(ak.flatten(y, axis=1))
 
@@ -133,13 +133,17 @@ def calculate_fatjet_observables(FJ, beta=1.0, fill_value=SENTINEL, lund_R=0.8, 
     N2 = ak.to_packed(ak.unflatten(n2.astype(np.float32), n_per_event))
     N3 = ak.to_packed(ak.unflatten(n3.astype(np.float32), n_per_event))
 
-    # jet -> point, then event -> jet -> point, then all the points of an event together
-    LundX = ak.unflatten(ak.unflatten(x_flat, n_points), n_per_event)
-    LundY = ak.unflatten(ak.unflatten(y_flat, n_points), n_per_event)
-    LundX = to_f32_jagged(ak.flatten(LundX, axis=2))
-    LundY = to_f32_jagged(ak.flatten(LundY, axis=2))
+    # shape: event -> Lund point
+    LundX = lund_points_per_event(x_flat, n_points, n_per_event)
+    LundY = lund_points_per_event(y_flat, n_points, n_per_event)
 
-    return N2, N3, LundX, LundY, n_jets
+    # per-FatJet values (event -> FatJet) go into the FatJet record
+    fatjet_obs = {"N2": N2, "N3": N3}
+    # separate records: the number of Lund points differs from the number of FatJets
+    lund_obs = {"LundX": LundX, "LundY": LundY}
+
+    return fatjet_obs, lund_obs, n_jets
+
 
 def make_friend_tree(root_fname, friend_fname, with_constituents=True, verbose=False):
     """
@@ -154,15 +158,10 @@ def make_friend_tree(root_fname, friend_fname, with_constituents=True, verbose=F
     n_evt = len(events)
     FJ = events.FatJet
 
-    # N2, N3 (shape: event -> FatJet) and primary Lund plane points (shape: event -> Lund point)
-    N2, N3, FatJet_LundX, FatJet_LundY, n_jets = calculate_fatjet_observables(
-        FJ, beta=1.0, fill_value=SENTINEL, lund_R=0.8, min_jet_pt=20.0
-    )
-    jets_like = {"N2": N2, "N3": N3}
+    fatjet_obs, lund_obs, n_jets = calculate_fatjet_observables(FJ, beta=1.0, fill_value=SENTINEL, lund_R=0.8)
 
     # make sure the friend tree has the same number of entries as the Delphes tree
-    all_arrays = dict(jets_like, LundX=FatJet_LundX, LundY=FatJet_LundY)
-    for name, arr in all_arrays.items():
+    for name, arr in {**fatjet_obs, **lund_obs}.items():
         if len(arr) != n_evt:
             raise RuntimeError(
                 f"{name} has {len(arr)} events but Delphes has {n_evt}: "
@@ -170,32 +169,20 @@ def make_friend_tree(root_fname, friend_fname, with_constituents=True, verbose=F
             )
 
     # force all jet-level observables to use the exact FatJet layout
-    jets_like = {name: force_fatjet_layout(arr, FJ) for name, arr in jets_like.items()}
+    fatjet_obs = {name: force_fatjet_layout(arr, FJ) for name, arr in fatjet_obs.items()}
 
     # Zip the jet-level variables into one FatJet record, so there is only one counter
     # per group structure (event -> jet, and event -> Lund point)
-    FatJet_record = ak.zip(
-        {"N2": jets_like["N2"], "N3": jets_like["N3"]},
-        depth_limit=2,
-    )
+    FatJet_record = ak.zip(fatjet_obs, depth_limit=2)
+
+    # branches to write: the FatJet record, plus one separate branch per Lund observable
+    branches = {"FatJet": FatJet_record}
+    for name, arr in lund_obs.items():
+        branches[f"FatJet_{name}"] = arr
 
     with uproot.recreate(friend_fname) as fout:
-        fout.mktree(
-            "DelphesFriend",
-            {
-                "FatJet": ak.type(FatJet_record),
-                "FatJet_LundX": ak.type(FatJet_LundX),
-                "FatJet_LundY": ak.type(FatJet_LundY),
-            },
-        )
-
-        fout["DelphesFriend"].extend(
-            {
-                "FatJet": FatJet_record,
-                "FatJet_LundX": FatJet_LundX,
-                "FatJet_LundY": FatJet_LundY,
-            }
-        )
+        fout.mktree("DelphesFriend", {name: ak.type(arr) for name, arr in branches.items()})
+        fout["DelphesFriend"].extend(branches)
 
     if verbose:
         print(f"Wrote friend tree with {n_evt} events and {n_jets} Lund jets: {friend_fname}")

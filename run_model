@@ -183,15 +183,11 @@ if __name__=="__main__":
         log_fname = "log_delphes.log"
         delphes_exe = "DelphesHepMC3"
 
-        if os.path.exists(root_fname):
-            if args["common"].verbose: print(f'removing old {root_fname}')
-            os.remove(root_fname)
-
-        # files derived from events.root would be outdated, remove them too
-        for stale in (friend_fname, merged_fname):
-            if os.path.exists(stale):
-                if args["common"].verbose: print(f'removing old {stale}')
-                os.remove(stale)
+        # remove the old Delphes output, and the files derived from it, which would be outdated
+        for old in (root_fname, friend_fname, merged_fname):
+            if os.path.exists(old):
+                if args["common"].verbose: print(f'removing old {old}')
+                os.remove(old)
 
         delphes_cmd = f'gunzip -c {hepmc_fname_gz} | {delphes_exe} {delphes_fname} {root_fname}'
         if not args["common"].quiet: print(f'Running Delphes ({log_fname})')
@@ -219,9 +215,9 @@ if __name__=="__main__":
         else:
             # step 3.5: merge the friend tree into the Delphes tree
             log_fname = "log_merge.log"
-            friend_branches = ",".join(DS_observables.FRIEND_BRANCHES)
+            friend_branches = "{" + ",".join(f'"{b}"' for b in DS_observables.FRIEND_BRANCHES) + "}"
             macro_verbose = "true" if args["common"].verbose else "false"
-            merge_cmd = f'root -l -b -q \'{merge_macro}("{root_fname}","{friend_fname}","{merged_fname}","{friend_branches}",{macro_verbose})\''
+            merge_cmd = f'root -l -b -q \'{merge_macro}("{root_fname}","{friend_fname}","{merged_fname}",{friend_branches},{macro_verbose})\''
             if not args["common"].quiet: print(f'Merging trees ({log_fname})')
             run_cmd(merge_cmd, log_fname, args["common"].verbose, shell=True)
             if args["common"].verbose: print(f'wrote {merged_fname}')
