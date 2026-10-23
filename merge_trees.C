@@ -1,5 +1,6 @@
 #include "TFile.h"
 #include "TTree.h"
+#include "TBranch.h"
 #include "TTreeReader.h"
 #include "TTreeReaderArray.h"
 #include "TSystem.h"
@@ -67,8 +68,15 @@ int merge_trees(
     return fail(5);
   }
 
-  // Readers
-  TTreeReader rMain(tm);
+  // The friend tree must have exactly one entry per Delphes entry
+  const Long64_t n = tm->GetEntries();
+  if (tf->GetEntries() != n) {
+    std::cerr << "Entry mismatch: " << fMain << " has " << n << " entries, "
+              << fFriend << " has " << tf->GetEntries() << "\n";
+    return fail(4);
+  }
+
+  // Reader for the friend tree
   TTreeReader rFr(tf);
 
   // Build a reader for each requested branch; all of them must exist
@@ -77,6 +85,7 @@ int merge_trees(
     std::string outName;                // e.g. "F_FatJet_N2"
     std::unique_ptr<TTreeReaderArray<Float_t>> rdr;  // leaf-counted array
     std::vector<float> buffer;          // output buffer
+    TBranch* branch = nullptr;          // new branch in the output tree
   };
   std::vector<FriendItem> items;
   items.reserve(branches.size());
@@ -92,47 +101,40 @@ int merge_trees(
     items.emplace_back(std::move(it));
   }
 
-  // --- Output: clone full Delphes structure, connect addresses to tm ---
-  std::unique_ptr<TFile> fout(TFile::Open(fOut, "RECREATE"));
-  if (!fout || fout->IsZombie()) {
-    std::cerr << "Cannot create " << fOut << "\n";
+  // --- Output: copy the Delphes file as it is, then append the new branches to the copy ---
+  // Cloning the tree entry by entry would rewrite the objects, which changes ROOT's internal
+  // reference IDs (fUniqueID) and breaks the references from jets to their constituents
+  if (!TFile::Cp(fMain, fOut, kFALSE)) {
+    std::cerr << "Cannot copy " << fMain << " to " << fOut << "\n";
     return fail(3);
   }
-  TTree* tout = tm->CloneTree(0);   // clone structure only
-  tout->SetName(tMain);             // keep familiar name
-  // Make tout's branches read from tm's memory so Fill() writes full Delphes
-  tout->CopyAddresses(tm);
+  std::unique_ptr<TFile> fout(TFile::Open(fOut, "UPDATE"));
+  if (!fout || fout->IsZombie()) {
+    std::cerr << "Cannot open " << fOut << " for update\n";
+    return fail(3);
+  }
+  TTree* tout = (TTree*)fout->Get(tMain);
+  if (!tout) {
+    std::cerr << "Main tree not found in " << fOut << "\n";
+    return fail(2);
+  }
 
-  // Add new friend branches to tout (pointing at our std::vector buffers)
+  // Add new friend branches to the tree (pointing at our std::vector buffers)
   for (auto& it : items) {
-    tout->Branch(it.outName.c_str(), &it.buffer);
+    it.branch = tout->Branch(it.outName.c_str(), &it.buffer);
   }
 
-  // --- Event loop: sync main and friend, copy arrays, and fill once per event
-  const Long64_t n = tm->GetEntries();
+  // --- Fill only the new branches, one value per existing entry ---
   for (Long64_t i = 0; i < n; ++i) {
-    // advance both readers/trees in lockstep
-    if (!rMain.Next() or !rFr.Next()) break;
-
-    // copy each friend array into the vector buffer
+    if (!rFr.Next()) break;
     for (auto& it : items) {
-      auto& rdr = *it.rdr;
-      it.buffer.assign(rdr.begin(), rdr.end());
+      it.buffer.assign(it.rdr->begin(), it.rdr->end());
+      it.branch->Fill();
     }
-
-    // Also load the main entry so tm's branch buffers are set
-    tm->GetEntry(i);
-
-    // write full Delphes + friend vectors in one go
-    tout->Fill();
   }
 
-
-  fout->cd();
-  tout->Write(tMain, TObject::kOverwrite);
+  tout->Write("", TObject::kOverwrite);
   fout->Close();
-
-
 
   if (verbose) {
     std::cout << "Wrote " << fOut << " with full Delphes + "

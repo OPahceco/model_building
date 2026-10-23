@@ -61,12 +61,20 @@ class DelphesSchema2(DelphesSchema):
     }
 
     def __init__(self, base_form):
+        entries = list(zip(base_form["fields"], base_form["contents"]))
+        # branches from the observables step (prefix F_) are plain jagged arrays without a "<name>_size"
+        # counter, which DelphesSchema cannot handle: set them aside here and add them back below
+        extra = [entry for entry in entries if entry[0].startswith("F_")]
         # avoid weird error when adding constituents
         # these two lists have to be kept in sync: zip, drop, unzip
-        base_form["fields"], base_form["contents"] = zip(*[entry for entry in zip(base_form["fields"], base_form["contents"]) if not "fBits" in entry[0]])
+        base_form["fields"], base_form["contents"] = zip(*[entry for entry in entries if not "fBits" in entry[0] and not entry[0].startswith("F_")])
         # enable using ak.sum on derived class
         behavior[ak.sum, "Particle"] = vec.backends.awkward.behavior[ak.sum, "Momentum4D"]
         super().__init__(base_form)
+        # add the F_ branches back as plain fields of the events
+        for field, content in extra:
+            self._form["fields"].append(field)
+            self._form["contents"].append(content)
 
 # ignore unnecessary warning
 from numba.core.errors import NumbaTypeSafetyWarning
