@@ -223,5 +223,5 @@ if __name__=="__main__":
             if args["common"].verbose: print(f'wrote {merged_fname}')
 
     if 'hist' in args["common"].steps:
-        Histogram.histogram(root_fname, helper, not args["common"].no_constituents, args["common"].gen_only, args["common"].debug, friend_filename=friend_fname)
-        if args["common"].verbose: print(f'wrote histograms of {root_fname}')
+        Histogram.histogram(root_fname, helper, not args["common"].no_constituents, args["common"].gen_only, args["common"].debug, merged_filename=merged_fname)
+        if args["common"].verbose: print('wrote Hists.pkl')

@@ -5,7 +5,6 @@ import numpy as np
 import hist
 import matplotlib as mpl
 import os
-import uproot
 from DS_observables import SENTINEL
 from coffea.nanoevents import NanoEventsFactory
 from common import load_events
@@ -404,25 +403,14 @@ def fill_stats(array):
         "stderr": sem(nparray),
     }
 
-def histogram(filename, helper, with_constituents=True, gen_only=False, debug=False, friend_filename=None):
-    events = load_events(filename, with_constituents=with_constituents)
-    
-    # additional observables (N2, N3, Lund points) from the friend tree of the observables step
-    # attached before any event selection so that they stay aligned with the events
-    have_friend = (friend_filename is not None and os.path.exists(friend_filename)
-                   and with_constituents and not gen_only)
-    if have_friend:
-        friend = uproot.open(f"{friend_filename}:DelphesFriend").arrays()
-        if len(friend) != len(events):
-            raise RuntimeError(
-                f"{friend_filename} has {len(friend)} events but {filename} has {len(events)}: "
-                "rerun the observables step."
-            )
-        for name in ["FatJet_N2", "FatJet_N3", "FatJet_LundX", "FatJet_LundY"]:
-            events[f"DS_{name}"] = friend[name]
-    else:
-        print("Skipping histograms of the additional observables (observables step not run, or no constituents)")
-    
+def histogram(filename, helper, with_constituents=True, gen_only=False, debug=False, merged_filename=None):
+    # use the merged file (Delphes + additional observables) if available, otherwise the plain Delphes file
+    have_extra = (merged_filename is not None and os.path.exists(merged_filename)
+                  and with_constituents and not gen_only)
+    events = load_events(merged_filename if have_extra else filename, with_constituents=with_constituents)
+    if not have_extra:
+        print("Skipping histograms of the additional observables (observables step not run, merge skipped, or no constituents)")
+
 
     # output dictionary with histograms and metadata
     output = {}
@@ -480,13 +468,13 @@ def histogram(filename, helper, with_constituents=True, gen_only=False, debug=Fa
         events["Jet12_sdpt"] = events["Jet12"].SoftDroppedJet.pt
 
         events = getTau(events)
-        
-        if have_friend:
+
+        if have_extra:
             # N2, N3 of the two leading jets, same layout as Jet12; jets without a value (sentinel) are masked out
             for name in ["N2", "N3"]:
-                values = events[f"DS_FatJet_{name}"][:, 0:2]
+                values = events[f"F_FatJet_{name}"][:, 0:2]
                 events[f"DSJet12_{name}"] = ak.mask(values, values != SENTINEL)
-        
+
 
     # gen-level info
     pid = events.GenParticle["PID"]
@@ -676,16 +664,16 @@ def histogram(filename, helper, with_constituents=True, gen_only=False, debug=Fa
             hist_dict.update(chain.from_iterable([
                 fill_hist(t,40,0,1,label)
             ]))
-            
-    # histograms of the additional observables (only if the friend tree was attached)
-    if have_friend:
+
+    # histograms of the additional observables (only if the merged file was used)
+    if have_extra:
         hist_dict.update(chain.from_iterable([
             fill_hist("DSJet12_N2",50,0,0.5,r"$N_2^{(\beta=1)}(J_{JETIND}^{\text{reco}})$"),
             fill_hist("DSJet12_N3",50,0,5,r"$N_3^{(\beta=1)}(J_{JETIND}^{\text{reco}})$"),
-            fill_hist("DS_FatJet_LundX",40,-1,7,r"Primary Lund plane $\ln(0.8/\Delta)$"),
-            fill_hist("DS_FatJet_LundY",50,-8,6,r"Primary Lund plane $\ln(k_{\text{T}}/\text{GeV})$"),
+            fill_hist("F_FatJet_LundX",40,-1,7,r"Primary Lund plane $\ln(0.8/\Delta)$"),
+            fill_hist("F_FatJet_LundY",50,-8,6,r"Primary Lund plane $\ln(k_{\text{T}}/\text{GeV})$"),
         ]))
-        
+
     # gen-level histograms
 
     hist_dict.update(chain.from_iterable([
